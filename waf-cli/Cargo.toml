@@ -25,18 +25,18 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 clap = { workspace = true, features = ["derive"] }
 schemars = { workspace = true }
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { workspace = true, features = ["serde"] }
 ahash = { workspace = true }
-http = "1"
+http = { workspace = true }
 
 # TLS support (self-signed cert generation + server)
-rcgen = "0.12"
-rustls-pemfile = "2.0"
-tokio-rustls = { version = "0.25", default-features = false }
+rcgen = { workspace = true }
+rustls-pemfile = { workspace = true }
+tokio-rustls = { workspace = true, default-features = false }
 rustls = { workspace = true, optional = true }
 
 # API client for CLI operations
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { workspace = true }
 
 [features]
 default = []

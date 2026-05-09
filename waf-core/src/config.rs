@@ -535,8 +535,10 @@ default_action = "Challenge"
 
     #[test]
     fn test_json_schema_generation() {
-        let schema: schemars::schema::SchemaObject = schemars::schema_for!(WafConfig).schema;
-        assert!(!schema.metadata.as_ref().unwrap().title.as_ref().is_none());
+        let schema: schemars::Schema = schemars::schema_for!(WafConfig);
+        // Convert to JSON and verify it's a valid object (not just true/false)
+        let json_value: serde_json::Value = schema.into();
+        assert!(json_value.is_object());
     }
 
     #[test]

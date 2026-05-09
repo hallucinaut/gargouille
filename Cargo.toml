@@ -8,46 +8,54 @@ edition = "2021"
 rust-version = "1.75"
 
 [workspace.dependencies]
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.45", features = ["full"] }
 hyper = { version = "1", features = ["full"] }
 http-body-util = "0.1"
-axum = "0.7"
-tower = "0.4"
-tower-http = { version = "0.5", features = ["trace", "cors", "compression-full"] }
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "compression-full"] }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
+toml = "0.9"
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-regex = "1.10"
+regex = "1.12"
 ahash = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Security & crypto
 ring = "0.17"
 rustls = "0.23"
-rustls-pemfile = "2.0"
+rustls-pemfile = "2.2"
 
 # Metrics
-prometheus-client = "0.22"
+prometheus-client = "0.24"
 
 # Serialization for rule storage
 serde_yaml = "0.9"
 
 # Blocking IP lookup (GeoIP)
-maxminddb = "0.24"
+maxminddb = "0.28"
 
 # CLI
-clap = { version = "4.5", features = ["derive"] }
-clap_complete = "4.5"
+clap = { version = "4.6", features = ["derive"] }
+clap_complete = "4.6"
 
 # Database
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 # Config validation
-schemars = "0.8"
+schemars = "0.9"
 
-uuid = { version = "1.7", features = ["v4", "serde"] }
+uuid = { version = "1.15", features = ["v4", "serde"] }
+
+# HTTP client (CLI operations)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# TLS cert generation
+rcgen = "0.14"
+tokio-rustls = { version = "0.26", default-features = false }
+http = "1"
