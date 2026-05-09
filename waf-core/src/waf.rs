@@ -9,6 +9,7 @@
 //! Thread-safety: mutable state uses `std::sync::Mutex` so that
 //! `evaluate()` takes `&self` and can be shared via `Arc` across async tasks.
 
+use crate::allowlist_service::AllowlistService;
 use crate::config::*;
 use std::sync::Mutex;
 
@@ -25,6 +26,7 @@ use crate::metrics::WafMetrics;
 pub struct GargouilleWaf {
     engine: RuleEngine,
     rate_limiter: Mutex<RateLimiter>,
+    allowlist_service: AllowlistService,
     #[cfg(feature = "sqlite")]
     database: Mutex<Option<WafDatabase>>,
     #[cfg(feature = "prometheus")]
@@ -48,6 +50,7 @@ impl GargouilleWaf {
         Self {
             engine,
             rate_limiter: Mutex::new(rate_limiter),
+            allowlist_service: AllowlistService::new(&config.waf.allowlist),
             #[cfg(feature = "sqlite")]
             database: Mutex::new(Self::open_database(&config)),
             #[cfg(feature = "prometheus")]
@@ -65,6 +68,19 @@ impl GargouilleWaf {
         }
 
         let ip_str = request.remote_addr.ip().to_string();
+
+        // ── Allowlist check (deny-by-default, runs first) ──────────
+        match self.allowlist_service.check_path(&request.full_uri) {
+            crate::allowlist_service::AllowlistResult::Blocked(reason) => {
+                #[cfg(feature = "prometheus")]
+                if let Some(metrics) = &self.metrics {
+                    metrics.record_blocked(0);
+                }
+                self.audit_log_with_score(request, &format!("{}", reason), 0, &[]);
+                return Decision::Blocked(reason);
+            }
+            crate::allowlist_service::AllowlistResult::Allowed => {}
+        }
 
         // 1. Check per-endpoint rate limits first (cheap operation)
         if self.config.rate_limiting.enabled && !self.config.rate_limiting.endpoint_limits.is_empty() {

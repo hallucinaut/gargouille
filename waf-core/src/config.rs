@@ -54,6 +54,20 @@ pub struct ServerConfig {
     pub tls_key: String,
 }
 
+// ─── Allowlist ──────────────────────────────────────────
+
+/// Configuration for the path-based allowlist (deny-by-default) feature.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct WafAllowlistConfig {
+    /// When true, block every request unless its path matches an entry in allowed_paths.
+    #[serde(default)]
+    pub allowed: bool,
+    /// List of paths (exact or prefix) that are permitted.
+    /// Admin paths (/admin/*) and metrics (/metrics) are always auto-allowed regardless.
+    #[serde(default)]
+    pub allowed_paths: Vec<String>,
+}
+
 // ─── WAF Engine ──────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -66,6 +80,9 @@ pub struct WafEngineConfig {
     pub upstream_timeout_ms: u64,
     #[serde(default)]
     pub strict_mode: bool,
+    /// Path-based allowlist (deny-by-default) feature.
+    #[serde(default)]
+    pub allowlist: WafAllowlistConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -358,6 +375,7 @@ impl Default for WafConfig {
                 max_body_size: default_max_body_size(),
                 upstream_timeout_ms: default_upstream_timeout_ms(),
                 strict_mode: true,
+                allowlist: WafAllowlistConfig::default(),
             },
             scoring: ScoringConfig {
                 threat_threshold: default_threat_threshold(),

@@ -97,6 +97,7 @@ pub enum BlockingReason {
     ThreatScoreExceeded { score: u32, threshold: u32 },
     DirectBlock { category: ThreatCategory },
     IpBlocklisted,
+    AllowlistDenied { path: String },
 }
 
 impl fmt::Display for BlockingReason {
@@ -107,6 +108,9 @@ impl fmt::Display for BlockingReason {
             }
             Self::DirectBlock { category } => write!(f, "Blocked: {category}"),
             Self::IpBlocklisted => write!(f, "IP address is blocklisted"),
+            Self::AllowlistDenied { path } => {
+                write!(f, "Path {} denied by allowlist policy", path)
+            }
         }
     }
 }

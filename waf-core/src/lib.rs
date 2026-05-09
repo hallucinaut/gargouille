@@ -62,6 +62,9 @@
 
 // ── Always-available modules ───────────────────────────────
 
+mod allowlist_schema;
+mod allowlist_service;
+
 mod config;
 pub use config::*;
 

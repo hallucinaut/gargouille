@@ -21,6 +21,7 @@ A lightweight HTTP request inspection engine written in Rust. It evaluates incom
 - **Risk scoring** — Accumulates threat points across all detectors; capped at 100, max 3 hits per category
 - **Decision pipeline** — Returns one of four outcomes: `Pass`, `Block(reason)`, `Challenge`, `RateLimited`
 - **Direct-block override** — Any single threat with confidence >= config threshold forces a block
+- **Path-based allowlist (deny-by-default)** — Block all requests except those on explicitly allowed paths. Auto-whitelists `/admin/*` and `/metrics` so the WAF stays manageable. Allowed paths still get full WAF rule scanning, so attacks inside allowed paths are detected and blocked.
 - **Sliding-window rate limiter** — Per-IP request counting with configurable burst allowance and auto-expiring blocks
 - **Per-endpoint rate limiting** — Separate limits for configured paths (e.g., `/api/login`)
 - **SQLite blocklist & audit log** — Persistent IP block/whitelist lists and per-request audit entries (feature-gated)
@@ -90,6 +91,13 @@ All settings live in `config/default.toml`, loaded via `WafConfig::load()`. Miss
 | `max_body_size` | `10485760` | 10 MB — oversized bodies rejected before scanning (DoS protection) |
 | `upstream_timeout_ms` | `30000` | reqwest timeout for upstream forwarding |
 | `strict_mode` | `true` | Enable strict HTTP compliance checks |
+
+### Allowlist settings
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `allowlist.allowed` | `false` | When true, only requests whose path matches an entry in `allowed_paths` are forwarded. All other paths return 403 immediately. Admin endpoints (`/admin/*`) and metrics (`/metrics*`) are always accessible regardless of this setting. |
+| `allowlist.allowed_paths` | `[]` | List of paths (exact or prefix) that are permitted when allowlist mode is active. Each entry must start with `/`, contain no query strings, no path traversal sequences, and no control characters. Maximum 512 characters per entry. Prefix matching: adding `/api` allows `/api`, `/api/users`, `/api/v1/data`. |
 
 ### Scoring settings
 
@@ -228,6 +236,55 @@ Request arrives
     └─ Default ─────────────────────► Decision::Pass (forward to upstream)
 ```
 
+### Deny-by-default decision flow (when allowlist is enabled)
+
+When `waf.allowlist.allowed = true`, the pipeline changes slightly. A new first checkpoint runs before everything else:
+
+```
+Request arrives
+    │
+    ├─ Allowlist check ─────────── if path not in allowed list → Decision::Blocked
+    │                                  (but /admin/* and /metrics* auto-pass)
+    │
+    ├─ Per-endpoint rate limiter ── if exceeded → Decision::RateLimited
+    ...
+```
+
+The key difference: **only requests whose path matches an entry in `allowed_paths` reach the WAF rule detectors**. All other paths are dropped at the door with a 403.
+
+This is different from traditional WAF behavior where everything passes through unless something malicious is detected. The deny-by-default model starts from zero trust: no endpoint is accessible unless you explicitly name it.
+
+#### Why deny-by-default?
+
+For small projects, traditional allow-list-and-check approach creates maintenance debt:
+
+| Traditional (allow-by-default) | Deny-by-default |
+|-------------------------------|-----------------|
+| Every new route must stay clean or be patched | You whitelist routes you actually have |
+| Forgetting a rule catches nothing | Forgetting to add a path blocks it immediately |
+| 9 detectors run on every request, including static assets that would never be attacked | Only whitelisted routes hit the detection engine |
+| Attackers probe all endpoints looking for loopholes | Most of your surface area is already closed |
+
+With deny-by-default:
+
+- You list only your real API routes (e.g., `/test/toto`, `/api/login`)
+- Every other URL returns 403 before any scanning happens
+- Whitelisted routes still get all 9 WAF rule detectors active, so SQLi and XSS inside allowed paths are caught
+- Admin endpoints (`/admin/*`) are auto-whitelisted so you can always manage the WAF
+
+Example config:
+
+```toml
+[waf]
+allowlist = { allowed = true, allowed_paths = ["/test/toto", "/api/login"] }
+```
+
+With this configuration:
+- `GET /test/toto` — passes through WAF scanning, clean requests reach upstream, attacks are blocked
+- `POST /test/toto` with body `' OR 1=1 --` — allowed by allowlist (path matches), then SQLi detector catches the attack and blocks it
+- `GET /anything-else` — immediately blocked, never reaches WAF rules
+- `GET /admin/status` — always accessible (auto-whitelisted)
+
 ## Rule detectors
 
 | Detector | File | Patterns | Key features |
@@ -269,6 +326,8 @@ gargouille/
     engine.rs                    — RuleEngine: instantiates 9 detectors, runs scan pipeline
     parser.rs                    — HttpRequest struct, URL decoding (limited depth),
                                    query param parsing, cookie parsing, searchable_text()
+    allowlist_schema.rs          — Zero-trust path validation: rejects traversal, null bytes, encoded attacks, entries over 512 chars
+    allowlist_service.rs         — Thread-safe allowlist gatekeeper: prefix matching, auto-whitelist for /admin and /metrics, runtime update support
     scoring.rs                   — ThreatInfo, ThreatCategory, ThreatScore, Action,
                                    BlockingReason, ScoringEngine (weight accumulation)
     rate_limit.rs                — RateLimiter: per-IP sliding window + blocked IP map
@@ -311,10 +370,10 @@ gargouille/
 
 ```bash
 # All crates — unit + integration tests
-cargo test --all          # 252 tests pass (190 unit + 62 integration)
+cargo test --all          # 288 tests pass (210 unit + 78 integration)
 
 # Only waf-core library
-cargo test -p waf-core    # 190 tests: lib unit tests + integration tests
+cargo test -p waf-core    # 210 tests: lib unit tests + schema/service internal tests + integration tests
 
 # Only CLI binary compilation (no tests in the binary crate itself)
 cargo test -p waf-cli     # compiles cleanly, 0 tests
@@ -323,14 +382,16 @@ cargo test -p waf-cli     # compiles cleanly, 0 tests
 | Test scope | Count | Coverage |
 |------------|-------|----------|
 | Parser | ~28 | URL decode (single/double/triple/invalid/mixed/empty), header access, query params, cookies, searchable text |
-| Config | ~11 | Defaults, deserialization, partial TOML, JSON schema generation, validation warnings |
+| Config | ~12 | Defaults, deserialization, partial TOML, JSON schema generation, validation warnings, allowlist config defaults |
 | Rate limiter | 14 | Limits, burst allowance, per-IP independence, blocked/unblocked IPs, endpoint-specific limits, stats, cleanup |
 | Scoring engine | 12 | Empty input, single/multi-category weights, capping at 100, threshold decisions, display formatting |
 | Rule detectors | ~85 | Each detector has positive tests (attack payloads), negative tests (clean inputs), case-insensitivity, edge cases |
 | WAF orchestrator (`engine.rs`) | 17 | Clean requests, SQLi/XSS/CLI/PT in body+query, combined attacks, header injection, SSTI/SSRF/LFI/deserialization detection |
+| Allowlist schema | ~9 | Path validation: leading slash requirement, traversal rejection, query/fragment rejection, null bytes, control chars, length limit, normalization |
+| Allowlist service | ~12 | Prefix matching, exact match, auto-whitelist, disabled mode, case sensitivity, runtime update, query string stripping |
 | Database | 8 | Schema creation, add/check/remove blocklist, audit log, recent threats, whitelist, duplicate handling |
 | Prometheus metrics | 11 | Zero-state, increment counters, render format, reset, high/low scores |
-| Integration | 62 | Full pipeline: clean passes, all attack vectors blocked, rate limiting, scoring thresholds, per-endpoint limits, mixed requests, cookies, encoded queries, IP validation, case-insensitive headers, direct-block thresholds |
+| Integration (all) | 78 | Full pipeline: clean passes, all attack vectors blocked, rate limiting, scoring thresholds, per-endpoint limits, mixed requests, cookies, encoded queries, IP validation, case-insensitive headers, direct-block thresholds, allowlist pass/block, WAF rules on allowed paths, auto-whitelist bypass prevention |
 
 ## Security considerations
 

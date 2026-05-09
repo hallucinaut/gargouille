@@ -21,6 +21,12 @@ max_body_size = 10485760
 upstream_timeout_ms = 30000
 # Enable strict HTTP compliance
 strict_mode = true
+# Path-based allowlist (deny-by-default mode)
+# When enabled, only requests whose path matches an entry in allowed_paths are forwarded.
+# Admin endpoints (/admin/*) and metrics (/metrics*) are always accessible regardless.
+[waf.allowlist]
+allowed = false
+allowed_paths = []  # e.g., ["/test/toto", "/api/login"]
 
 [scoring]
 # Threshold to trigger action (0-100). Higher = more sensitive
