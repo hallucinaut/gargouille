@@ -136,7 +136,7 @@ impl WafDatabase {
     }
 
     /// Get recent threats (last N entries).
-    pub fn get_recent_threats(&self, limit: usize) -> Result<Vec<ThreatEntry>> {
+    pub fn get_recent_threats(&self, limit: i64) -> Result<Vec<ThreatEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT ip, path, threat_score, action, rule_ids, timestamp FROM audit_log ORDER BY timestamp DESC LIMIT ?1"
         )?;
@@ -165,7 +165,7 @@ impl WafDatabase {
         self.conn.query_row(
             "SELECT COUNT(*) FROM user_whitelist WHERE ip = ?1",
             [ip],
-            |row| row.get::<_, u64>(0),
+            |row| row.get::<_, i64>(0),
         )
         .map(|count| count > 0)
         .unwrap_or(false)
@@ -186,11 +186,11 @@ impl WafDatabase {
 
     // ── Stats ───────────────────────────────────────────
 
-    pub fn get_blocklist_count(&self) -> Result<u64> {
+    pub fn get_blocklist_count(&self) -> Result<i64> {
         self.conn.query_row("SELECT COUNT(*) FROM blocklist_ips", [], |row| row.get(0))
     }
 
-    pub fn get_audit_count(&self) -> Result<u64> {
+    pub fn get_audit_count(&self) -> Result<i64> {
         self.conn.query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))
     }
 }

@@ -220,7 +220,7 @@ impl GargouilleWaf {
 
     /// Get recent audit log entries. Only available with the `sqlite` feature.
     #[cfg(feature = "sqlite")]
-    pub fn get_recent_threats(&self, limit: usize) -> Option<Vec<ThreatEntry>> {
+    pub fn get_recent_threats(&self, limit: i64) -> Option<Vec<ThreatEntry>> {
         self.database.lock().unwrap().as_ref()
             .map(|db| db.get_recent_threats(limit).unwrap_or_default())
     }

@@ -27,16 +27,16 @@ clap = { workspace = true, features = ["derive"] }
 schemars = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 ahash = { workspace = true }
-http = { workspace = true }
+http = "1"
 
 # TLS support (self-signed cert generation + server)
-rcgen = { workspace = true }
+rcgen = { version = "0.14" }
 rustls-pemfile = { workspace = true }
-tokio-rustls = { workspace = true, default-features = false }
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12"] }
 rustls = { workspace = true, optional = true }
 
 # API client for CLI operations
-reqwest = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [features]
 default = []

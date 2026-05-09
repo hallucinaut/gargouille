@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Gargouille WAF — lightweight web application firewall engine library"
 license = "MIT"
-repository = "https://github.com/hallucinaut/gargouille"
+repository = "https://github.com/brainless/gargouille"
 readme = "../../README.md"
 categories = ["network-programming", "security"]
 
