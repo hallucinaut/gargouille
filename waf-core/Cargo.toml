@@ -1,0 +1,38 @@
+[package]
+name = "waf-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Gargouille WAF — lightweight web application firewall engine library"
+license = "MIT"
+repository = "https://github.com/brainless/gargouille"
+readme = "../../README.md"
+categories = ["network-programming", "security"]
+
+[features]
+default = ["sqlite", "prometheus"]
+## Enable SQLite-backed blocklist and audit-log storage.
+sqlite = ["dep:rusqlite"]
+## Enable Prometheus-compatible metrics exporter.
+prometheus = ["dep:prometheus-client"]
+## Enable TLS-inspection config types (runtime inspection not yet implemented).
+tls-inspection = ["dep:rustls", "dep:ring"]
+## Enable GeoIP lookup and country-blocklist support.
+geo-ip = ["dep:maxminddb"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+regex = { workspace = true }
+ahash = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+schemars = { workspace = true }
+
+# optional dependencies — gated by feature flags above
+prometheus-client = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+ring = { workspace = true, optional = true }
+maxminddb = { workspace = true, optional = true }

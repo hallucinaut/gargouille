@@ -1,0 +1,53 @@
+[workspace]
+members = ["waf-core", "waf-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[workspace.dependencies]
+tokio = { version = "1.35", features = ["full"] }
+hyper = { version = "1", features = ["full"] }
+http-body-util = "0.1"
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace", "cors", "compression-full"] }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+regex = "1.10"
+ahash = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Security & crypto
+ring = "0.17"
+rustls = "0.23"
+rustls-pemfile = "2.0"
+
+# Metrics
+prometheus-client = "0.22"
+
+# Serialization for rule storage
+serde_yaml = "0.9"
+
+# Blocking IP lookup (GeoIP)
+maxminddb = "0.24"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Config validation
+schemars = "0.8"
+
+uuid = { version = "1.7", features = ["v4", "serde"] }

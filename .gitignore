@@ -1,0 +1,8 @@
+/target
+*.log
+database/*.db
+database/*.db-shm
+database/*.db-wal
+certs/
+logs/
+.cargo-cache
