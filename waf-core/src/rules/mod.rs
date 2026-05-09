@@ -38,6 +38,9 @@ pub use header_injection::*;
 mod path_traversal;
 pub use path_traversal::*;
 
+mod bot_detection;
+pub use bot_detection::BotDetectionDetector;
+
 
 
 /// Compile a regex once per rule with optimized settings.

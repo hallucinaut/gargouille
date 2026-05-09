@@ -120,13 +120,22 @@ impl fmt::Display for BlockingReason {
 /// Accumulates scores from all detectors and produces a decision.
 pub struct ScoringEngine {
     config: ScoringConfig,
+    bot_detection_weight: u32,
 }
 
 const MAX_POSSIBLE_SCORE: u32 = 100;
 
 impl ScoringEngine {
     pub fn new(config: ScoringConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            bot_detection_weight: 10,
+        }
+    }
+
+    /// Set the bot detection weight for scoring.
+    pub fn set_bot_detection_weight(&mut self, weight: u32) {
+        self.bot_detection_weight = weight;
     }
 
     /// Access the scoring configuration.
@@ -154,6 +163,7 @@ impl ScoringEngine {
         header_injection_threats: &[ThreatInfo],
         path_traversal_threats: &[ThreatInfo],
         protocol_violation_threats: &[ThreatInfo],
+        bot_detection_threats: &[ThreatInfo],
     ) -> ThreatScore {
         let mut total = 0u32;
         let mut threats = Vec::new();
@@ -179,6 +189,7 @@ impl ScoringEngine {
         add_category!(header_injection_threats, self.config.header_injection_weight);
         add_category!(path_traversal_threats, self.config.path_traversal_weight);
         add_category!(protocol_violation_threats, self.config.protocol_violation_weight);
+        add_category!(bot_detection_threats, self.bot_detection_weight);
 
         // Cap total at 100
         total = total.min(100);
@@ -225,6 +236,7 @@ mod tests {
             path_traversal_weight: 20,
             protocol_violation_weight: 15,
             anomaly_score: 10,
+            bot_detection_weight: 10,
             high_confidence_threshold: 0.90,
         }
     }
@@ -234,6 +246,7 @@ mod tests {
         let engine = ScoringEngine::new(make_config());
         let score = engine.evaluate(
             &[], &[], &[], &[], &[], &[], &[], &[], &[], &[],
+            &[],
         );
         assert_eq!(score.total_score, 0);
         assert!(score.is_passed());
@@ -243,7 +256,7 @@ mod tests {
     fn test_single_sqli_below_threshold() {
         let engine = ScoringEngine::new(make_config());
         let threats = vec![make_threat(ThreatCategory::SqlInjection)];
-        let score = engine.evaluate(&threats, &[], &[], &[], &[], &[], &[], &[], &[], &[]);
+        let score = engine.evaluate(&threats, &[], &[], &[], &[], &[], &[], &[], &[], &[], &[]);
         assert_eq!(score.total_score, 30);
         // Single SQLi (30 points) is below threshold (50), so request passes
         assert!(score.is_passed());
@@ -262,7 +275,7 @@ mod tests {
                 confidence: 0.85,
             }
         }).collect();
-        let score = engine.evaluate(&threats, &[], &[], &[], &[], &[], &[], &[], &[], &[]);
+        let score = engine.evaluate(&threats, &[], &[], &[], &[], &[], &[], &[], &[], &[], &[]);
         assert_eq!(score.total_score, 90); // 30 * 3 = 90
         assert_eq!(score.threats.len(), 3);
     }
@@ -272,7 +285,7 @@ mod tests {
         let engine = ScoringEngine::new(make_config());
         let sqli = vec![make_threat(ThreatCategory::SqlInjection)];
         let xss = vec![make_threat(ThreatCategory::Xss)];
-        let score = engine.evaluate(&sqli, &xss, &[], &[], &[], &[], &[], &[], &[], &[]);
+        let score = engine.evaluate(&sqli, &xss, &[], &[], &[], &[], &[], &[], &[], &[], &[]);
         assert_eq!(score.total_score, 55); // 30 + 25
     }
 
@@ -290,7 +303,7 @@ mod tests {
         let header = vec![make_threat(ThreatCategory::HeaderInjection)];
         let pt = vec![make_threat(ThreatCategory::PathTraversal)];
         let proto = vec![make_threat(ThreatCategory::ProtocolViolation)];
-        let score = engine.evaluate(&sqli, &xss, &cmdi, &lfi, &ssti, &ssrf, &deser, &header, &pt, &proto);
+        let score = engine.evaluate(&sqli, &xss, &cmdi, &lfi, &ssti, &ssrf, &deser, &header, &pt, &proto, &[]);
         assert_eq!(score.total_score, 100); // capped
     }
 
@@ -300,7 +313,7 @@ mod tests {
         config.threat_threshold = 30;
         let engine = ScoringEngine::new(config);
         let threats = vec![make_threat(ThreatCategory::SqlInjection)];
-        let score = engine.evaluate(&threats, &[], &[], &[], &[], &[], &[], &[], &[], &[]);
+        let score = engine.evaluate(&threats, &[], &[], &[], &[], &[], &[], &[], &[], &[], &[]);
         assert!(!score.is_passed());
         match score.action {
             Action::Block(_) => {},
@@ -314,15 +327,15 @@ mod tests {
         config.threat_threshold = 40;
         let engine = ScoringEngine::new(config);
         let threats = vec![make_threat(ThreatCategory::SqlInjection)];
-        let score = engine.evaluate(&threats, &[], &[], &[], &[], &[], &[], &[], &[], &[]);
-        assert!(score.is_passed());
+        let score = engine.evaluate(&threats, &[], &[], &[], &[], &[], &[], &[], &[], &[], &[]);
+        assert!(score.is_passed())
     }
 
     #[test]
     fn test_header_injection_low_weight() {
         let engine = ScoringEngine::new(make_config());
         let threats = vec![make_threat(ThreatCategory::HeaderInjection)];
-        let score = engine.evaluate(&[], &[], &[], &[], &[], &[], &[], &threats, &[], &[]);
+        let score = engine.evaluate(&[], &[], &[], &[], &[], &[], &[], &threats, &[], &[], &[]);
         assert_eq!(score.total_score, 20);
         assert!(score.is_passed()); // 20 < 50 threshold
     }
@@ -331,7 +344,7 @@ mod tests {
     fn test_protocol_violation_weight() {
         let engine = ScoringEngine::new(make_config());
         let threats = vec![make_threat(ThreatCategory::ProtocolViolation)];
-        let score = engine.evaluate(&[], &[], &[], &[], &[], &[], &[], &[], &[], &threats);
+        let score = engine.evaluate(&[], &[], &[], &[], &[], &[], &[], &[], &[], &threats, &[]);
         assert_eq!(score.total_score, 15);
     }
 

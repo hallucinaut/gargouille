@@ -14,6 +14,14 @@ fn test_config() -> WafConfig {
     config
 }
 
+/// Config optimized for bot detection integration testing — high threshold
+/// so only clear scanner fingerprints trigger blocks, not scoring artifacts.
+fn bot_test_config() -> WafConfig {
+    let mut config = WafConfig::default();
+    config.rate_limiting.enabled = false;
+    config
+}
+
 fn make_request(method: &str, path: &str, query: &str, body: &[u8]) -> HttpRequest {
     HttpRequest {
         method: method.to_string(),
@@ -804,4 +812,270 @@ fn test_response_headers_config() {
     assert_eq!(config.response_headers.x_content_type_options, "nosniff");
     assert_eq!(config.response_headers.content_security_policy, "default-src 'self'; script-src 'self'");
     assert!(!config.response_headers.strict_transport_security.is_empty());
+}
+
+// ── Bot Detection Integration Tests ───────────────
+
+#[test]
+fn test_bot_scanner_fingerprint_blocked() {
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["sqlmap/1.7.2#stable (https://sqlmap.org)".into()]);
+    let req = make_request_with_headers("GET", "/", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "Scanner fingerprint should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_scanner_fingerprint_nikto_blocked() {
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["Mozilla/5.0 (compatible; Nikto/2.1.6)".into()]);
+    let req = make_request_with_headers("GET", "/admin", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "Nikto UA should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_clean_browser_ua_passes() {
+    let mut waf = GargouilleWaf::new(bot_test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36".into()]);
+    headers.insert("accept".into(), vec!["text/html,application/xhtml+xml,*/*".into()]);
+    headers.insert("host".into(), vec!["example.com".into()]);
+    let req = make_request_with_headers("GET", "/index.html", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Pass), "Clean browser should pass: {:?}", decision);
+}
+
+#[test]
+fn test_bot_firefox_ua_passes() {
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0".into()]);
+    let req = make_request_with_headers("GET", "/page", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Pass), "Firefox UA should pass: {:?}", decision);
+}
+
+#[test]
+fn test_bot_ios_mobile_ua_passes() {
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/21E237".into()]);
+    let req = make_request_with_headers("GET", "/mobile-page", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Pass), "iOS mobile UA should pass: {:?}", decision);
+}
+
+#[test]
+fn test_bot_empty_ua_blocked() {
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["".into()]);
+    let req = make_request_with_headers("GET", "/api/data", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "Empty UA should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_null_byte_ua_blocked() {
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["Mozilla/5.0\x00attack".into()]);
+    let req = make_request_with_headers("GET", "/api/data", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "Null byte UA should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_case_insensitive_scanner() {
+    // Scanner names in uppercase should still be detected
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["NIKTO/2.1.6 (Scanner)".into()]);
+    let req = make_request_with_headers("GET", "/admin", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "Uppercase scanner should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_case_insensitive_sqlmap() {
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["SQLMAP/1.7.2".into()]);
+    let req = make_request_with_headers("GET", "/login", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "Uppercase SQLMAP should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_curl_ua_blocked() {
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["curl/8.4.0".into()]);
+    let req = make_request_with_headers("GET", "/api/users", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "curl UA should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_go_http_client_blocked() {
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["Go-http-client/1.1".into()]);
+    let req = make_request_with_headers("POST", "/api/fetch", "", b"{}", headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "Go-http-client should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_python_requests_blocked() {
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["python-requests/2.31.0".into()]);
+    let req = make_request_with_headers("POST", "/api/data", "", b"{\"key\": \"value\"}", headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "python-requests should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_referer_scanner_blocked() {
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("referer".into(), vec!["DirBuster scan probe list".into()]);
+    let req = make_request_with_headers("GET", "/sensitive", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "Referer scanner should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_missing_host_header_blocked() {
+    // Multiple headers but no Host — typical bot behavior
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["sqlmap/1.7".into()]);
+    headers.insert("accept".into(), vec!["*/*".into()]);
+    // No host header injected
+    let req = make_request_with_headers("GET", "/api/exec", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "Missing host with multiple headers should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_encoded_scanner_fingerprint_blocked() {
+    // Hex-encoded scanner signature in a custom header
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    // %6E%69%6B%74%6F decodes to "nikto"
+    headers.insert("x-custom-header".into(), vec!["%6E%69%6B%74%6F".into()]);
+    let req = make_request_with_headers("GET", "/admin", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "Encoded scanner should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_control_char_ua_blocked() {
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["Mozilla\x01control-injection".into()]);
+    let req = make_request_with_headers("GET", "/page", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "Control char UA should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_single_char_ua_blocked() {
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["x".into()]);
+    let req = make_request_with_headers("GET", "/page", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "Single-char UA should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_combined_attack_with_scanner_blocked() {
+    // Scanner fingerprint + SQL injection in body — both detect
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["sqlmap/1.7.2#stable (https://sqlmap.org)".into()]);
+    let req = make_request_with_headers("POST", "/login", "", b"admin' OR '1'='1", headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "Combined bot+attack should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_mixed_clean_passes() {
+    // Clean browser with full headers — no bot signals
+    let mut waf = GargouilleWaf::new(bot_test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15".into()]);
+    headers.insert("accept".into(), vec!["text/html,application/xhtml+xml,*/*;q=0.9".into()]);
+    headers.insert("host".into(), vec!["example.com".into()]);
+    headers.insert("referer".into(), vec!["https://example.com/page".into()]);
+    let req = make_request_with_headers("GET", "/secure-page", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Pass), "Clean Safari should pass: {:?}", decision);
+}
+
+#[test]
+fn test_bot_nmap_detected() {
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["Mozilla/5.0 (compatible; Nmap Scripting Engine)".into()]);
+    let req = make_request_with_headers("GET", "/scan-target", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "Nmap should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_masscan_detected() {
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["Mozilla/5.0 Masscan/1.3.2".into()]);
+    let req = make_request_with_headers("GET", "/", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "Masscan should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_gobuster_detected() {
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["gobuster/3.6".into()]);
+    let req = make_request_with_headers("GET", "/admin", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "Gobuster should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_ffuf_detected() {
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["ffuf/2.1.0".into()]);
+    let req = make_request_with_headers("POST", "/fuzz-target", "", b"FUZZ", headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "FFUF should block: {:?}", decision);
+}
+
+#[test]
+fn test_bot_nginx_user_agent_passes() {
+    // nginx/1.x user agent is NOT a scanner — should pass
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["Mozilla/5.0 (compatible; nginx/1.24.0)".into()]);
+    let req = make_request_with_headers("GET", "/health", "", &[], headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Pass), "nginx UA should pass: {:?}", decision);
+}
+
+#[test]
+fn test_bot_apache_http_client_blocked() {
+    let mut waf = GargouilleWaf::new(test_config());
+    let mut headers = AHashMap::new();
+    headers.insert("user-agent".into(), vec!["Apache-HttpClient/4.5.14 (Java/17.0.9)".into()]);
+    let req = make_request_with_headers("POST", "/api/call", "", b"{}", headers);
+    let decision = waf.evaluate(&req);
+    assert!(matches!(decision, waf_core::Decision::Blocked(_)), "Apache HttpClient should block: {:?}", decision);
 }

@@ -124,6 +124,9 @@ pub struct ScoringConfig {
     pub protocol_violation_weight: u32,
     #[serde(default = "default_anomaly_score")]
     pub anomaly_score: u32,
+    /// Weight applied to bot/behavioral detection threats.
+    #[serde(default = "default_bot_detection_weight")]
+    pub bot_detection_weight: u32,
     /// Minimum confidence required for direct-block override.
     #[serde(default = "default_high_confidence_threshold")]
     pub high_confidence_threshold: f32,
@@ -262,6 +265,7 @@ fn default_header_injection_weight() -> u32 { 20 }
 fn default_path_traversal_weight() -> u32 { 20 }
 fn default_protocol_violation_weight() -> u32 { 15 }
 fn default_anomaly_score() -> u32 { 10 }
+fn default_bot_detection_weight() -> u32 { 10 }
 fn default_requests_per_window() -> u64 { 100 }
 fn default_window_seconds() -> u64 { 60 }
 fn default_burst_allowance() -> u32 { 20 }
@@ -321,7 +325,8 @@ impl WafConfig {
             + self.scoring.deserialization_weight
             + self.scoring.header_injection_weight
             + self.scoring.path_traversal_weight
-            + self.scoring.protocol_violation_weight;
+            + self.scoring.protocol_violation_weight
+            + self.scoring.bot_detection_weight;
         if total_weight < 10 {
             warnings.push(
                 "Sum of all scoring weights is below 10 — WAF may fail to detect threats".into(),
@@ -349,6 +354,7 @@ impl WafConfig {
         s.header_injection_weight = clamp_weight(s.header_injection_weight);
         s.path_traversal_weight = clamp_weight(s.path_traversal_weight);
         s.protocol_violation_weight = clamp_weight(s.protocol_violation_weight);
+        s.bot_detection_weight = clamp_weight(s.bot_detection_weight);
         s.threat_threshold = clamp_threshold(s.threat_threshold);
         if s.high_confidence_threshold < 0.1 || s.high_confidence_threshold > 1.0 {
             eprintln!("⚠ high_confidence_threshold out of range, resetting to 0.90");
@@ -390,6 +396,7 @@ impl Default for WafConfig {
                 path_traversal_weight: default_path_traversal_weight(),
                 protocol_violation_weight: default_protocol_violation_weight(),
                 anomaly_score: default_anomaly_score(),
+                bot_detection_weight: default_bot_detection_weight(),
                 high_confidence_threshold: default_high_confidence_threshold(),
             },
             rate_limiting: RateLimitingConfig {
@@ -572,5 +579,29 @@ default_action = "Challenge"
         let config = WafConfig::default();
         assert!(config.bot_protection.enabled);
         assert_eq!(config.bot_protection.captcha_threshold, 5);
+    }
+
+    #[test]
+    fn test_bot_detection_weight_default() {
+        let config = WafConfig::default();
+        assert_eq!(config.scoring.bot_detection_weight, 10);
+    }
+
+    #[test]
+    fn test_toml_bot_detection_weight_deserialization() {
+        let toml_str = r#"
+[scoring]
+bot_detection_weight = 25
+"#;
+        let config: WafConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.scoring.bot_detection_weight, 25);
+    }
+
+    #[test]
+    fn test_sanitize_clamps_bot_detection_weight() {
+        let mut config = WafConfig::default();
+        config.scoring.bot_detection_weight = 200;
+        config.sanitize();
+        assert_eq!(config.scoring.bot_detection_weight, 100);
     }
 }

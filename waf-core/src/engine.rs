@@ -9,7 +9,7 @@
 use crate::config::{ScoringConfig, WafEngineConfig, ThreatAction};
 use crate::parser::HttpRequest;
 use crate::scoring::{ScoringEngine, ThreatScore};
-use crate::rules::{SqlInjectionDetector, XssDetector, CmdiDetector, LfiRfiDetector, SstiDetector, SsrfDetector, DeserializationDetector, HeaderInjectionDetector, PathTraversalDetector};
+use crate::rules::{BotDetectionDetector, SqlInjectionDetector, XssDetector, CmdiDetector, LfiRfiDetector, SstiDetector, SsrfDetector, DeserializationDetector, HeaderInjectionDetector, PathTraversalDetector};
 
 /// The main rule engine that evaluates requests against all threat rules.
 pub struct RuleEngine {
@@ -25,6 +25,7 @@ pub struct RuleEngine {
     deserialization: DeserializationDetector,
     header_injection: HeaderInjectionDetector,
     path_traversal: PathTraversalDetector,
+    bot_detection: BotDetectionDetector,
 }
 
 impl RuleEngine {
@@ -42,6 +43,7 @@ impl RuleEngine {
             deserialization: DeserializationDetector::new(),
             header_injection: HeaderInjectionDetector::new(),
             path_traversal: PathTraversalDetector::new(),
+            bot_detection: BotDetectionDetector::new(),
         }
     }
 
@@ -59,11 +61,13 @@ impl RuleEngine {
         let header_injection_threats = self.header_injection.scan(&texts);
         let path_traversal_threats = self.path_traversal.scan(&texts);
         let protocol_violation_threats: Vec<crate::scoring::ThreatInfo> = Vec::new();
+        let bot_detection_threats = self.bot_detection.scan(&texts);
         let mut score = self.scoring_engine.evaluate(
             &sqli_threats, &xss_threats, &cmdi_threats, &lfi_rfi_threats,
             &ssti_threats, &ssrf_threats, &deserialization_threats,
             &header_injection_threats, &path_traversal_threats,
             &protocol_violation_threats,
+            &bot_detection_threats,
         );
 
         // If the engine score didn't trigger a block but there were threats, check if
