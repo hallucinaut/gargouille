@@ -17,7 +17,7 @@ use axum::response::IntoResponse;
 use clap::Parser;
 
 use ahash::AHashMap;
-use waf_core::{Decision, GargouilleWaf, HttpRequest, WafConfig};
+use waf_core::{admin_auth::AdminAuthService, Decision, GargouilleWaf, HttpRequest, WafConfig};
 use crate::middleware::GargouilleMiddleware;
 
 // ── CLI argument parsing ────────────────────────────────
@@ -49,6 +49,8 @@ enum Commands {
         reason: String,
         #[arg(long, default_value_t = 8080u16)]
         admin_port: u16,
+        #[arg(long)]
+        token: Option<String>,
     },
 
     /// Unblock an IP address via the management API
@@ -57,6 +59,8 @@ enum Commands {
         ip: String,
         #[arg(long, default_value_t = 8080u16)]
         admin_port: u16,
+        #[arg(long)]
+        token: Option<String>,
     },
 
     /// Add an IP to the whitelist via the management API
@@ -67,6 +71,8 @@ enum Commands {
         reason: String,
         #[arg(long, default_value_t = 8080u16)]
         admin_port: u16,
+        #[arg(long)]
+        token: Option<String>,
     },
 
     /// Show WAF status and recent threats via the management API
@@ -75,6 +81,8 @@ enum Commands {
         limit: Option<usize>,
         #[arg(long, default_value_t = 8080u16)]
         admin_port: u16,
+        #[arg(long)]
+        token: Option<String>,
     },
 
     /// Render Prometheus metrics (for scraping)
@@ -97,17 +105,21 @@ async fn main() {
         Commands::Serve { .. } => {
             serve(cli.command).await;
         }
-        Commands::Block { ip, reason, admin_port } => {
-            handle_block_ip(ip.as_str(), reason.as_str(), *admin_port).await;
+        Commands::Block { ip, reason, admin_port, token } => {
+            let tok = token.as_deref();
+            handle_block_ip(ip.as_str(), reason.as_str(), *admin_port, tok).await;
         }
-        Commands::Unblock { ip, admin_port } => {
-            handle_unblock_ip(ip.as_str(), *admin_port).await;
+        Commands::Unblock { ip, admin_port, token } => {
+            let tok = token.as_deref();
+            handle_unblock_ip(ip.as_str(), *admin_port, tok).await;
         }
-        Commands::Whitelist { ip, reason, admin_port } => {
-            handle_whitelist_ip(ip.as_str(), reason.as_str(), *admin_port).await;
+        Commands::Whitelist { ip, reason, admin_port, token } => {
+            let tok = token.as_deref();
+            handle_whitelist_ip(ip.as_str(), reason.as_str(), *admin_port, tok).await;
         }
-        Commands::Status { limit, admin_port } => {
-            handle_status(limit.unwrap_or(20), *admin_port).await;
+        Commands::Status { limit, admin_port, token } => {
+            let tok = token.as_deref();
+            handle_status(limit.unwrap_or(20), *admin_port, tok).await;
         }
         Commands::Metrics => {
             println!("Gargouille WAF Metrics");
@@ -148,7 +160,13 @@ async fn serve(cmd: Commands) {
     println!("Gargouille WAF v{} - Starting...", env!("CARGO_PKG_VERSION"));
     println!("   Listen:         {}:{} ", config.server.listen_addr, server_port);
     println!("   Upstream:       {}:{}", upstream_host, upstream_port);
-    println!("   Admin API:      http://{}:{}/admin", config.server.listen_addr, server_port);
+    // Set up secure admin auth
+    let admin_service = AdminAuthService::new(&config);
+    let admin_prefix = admin_service.get_path_prefix();
+    let admin_token = admin_service.get_log_token_value();
+    println!("   Admin API:      http://{}:{}", config.server.listen_addr, server_port);
+    println!("   Admin path:     {}", admin_prefix);
+    println!("   Admin token:    {} (set in X-Admin-Token header)", admin_token);
 
     // Bind listener
     let addr: SocketAddr = format!("{}:{}", config.server.listen_addr, server_port).parse().unwrap();
@@ -161,17 +179,19 @@ async fn serve(cmd: Commands) {
     // Build the app with shared state and proper route handlers
     let state = AppState {
         waf: waf.clone(),
+        admin_service: admin_service.clone(),
         upstream_host: upstream_host.clone(),
         upstream_port,
         middleware,
     };
 
+    // Use the dynamic admin prefix for all admin routes
     let router = Router::new()
-        .route("/admin/block/{ip}", axum::routing::post(block_admin_handler))
-        .route("/admin/unblock/{ip}", axum::routing::post(unblock_admin_handler))
-        .route("/admin/whitelist/{ip}", axum::routing::post(whitelist_admin_handler))
-        .route("/admin/status", axum::routing::get(status_handler))
-        .route("/admin/metrics", axum::routing::get(metrics_handler))
+        .route(&format!("{}block/{{ip}}", admin_prefix), axum::routing::post(block_admin_handler))
+        .route(&format!("{}unblock/{{ip}}", admin_prefix), axum::routing::post(unblock_admin_handler))
+        .route(&format!("{}whitelist/{{ip}}", admin_prefix), axum::routing::post(whitelist_admin_handler))
+        .route(&format!("{}status", admin_prefix), axum::routing::get(status_handler))
+        .route(&format!("{}metrics", admin_prefix), axum::routing::get(metrics_handler))
         .fallback(axum::routing::get(proxy_handler).post(proxy_handler))
         .with_state(state);
 
@@ -185,6 +205,7 @@ async fn serve(cmd: Commands) {
 #[derive(Clone)]
 struct AppState {
     waf: Arc<GargouilleWaf>,
+    admin_service: AdminAuthService,
     upstream_host: String,
     upstream_port: u16,
     middleware: GargouilleMiddleware,
@@ -194,8 +215,24 @@ struct AppState {
 
 async fn block_admin_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
-    axum::extract::Path(ip): axum::extract::Path<String>,
+    headers: HeaderMap,
+    path: String,
 ) -> impl IntoResponse {
+    // Authenticate via X-Admin-Token header
+    let token = headers.get("X-Admin-Token")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    
+    let result = state.admin_service.authenticate(token, &format!("/block/{}", path));
+    if !result.authorized {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"error":"authentication_required"}"#))
+            .unwrap();
+    }
+
+    let ip = path;
     if !waf_core::database::validate_ip(&ip) {
         return Response::builder()
             .status(StatusCode::BAD_REQUEST)
@@ -214,8 +251,24 @@ async fn block_admin_handler(
 
 async fn unblock_admin_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
-    axum::extract::Path(ip): axum::extract::Path<String>,
+    headers: HeaderMap,
+    path: String,
 ) -> impl IntoResponse {
+    // Authenticate via X-Admin-Token header
+    let token = headers.get("X-Admin-Token")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    
+    let result = state.admin_service.authenticate(token, &format!("/unblock/{}", path));
+    if !result.authorized {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"error":"authentication_required"}"#))
+            .unwrap();
+    }
+
+    let ip = path;
     if !waf_core::database::validate_ip(&ip) {
         return Response::builder()
             .status(StatusCode::BAD_REQUEST)
@@ -234,8 +287,24 @@ async fn unblock_admin_handler(
 
 async fn whitelist_admin_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
-    axum::extract::Path(ip): axum::extract::Path<String>,
+    headers: HeaderMap,
+    path: String,
 ) -> impl IntoResponse {
+    // Authenticate via X-Admin-Token header
+    let token = headers.get("X-Admin-Token")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    
+    let result = state.admin_service.authenticate(token, &format!("/whitelist/{}", path));
+    if !result.authorized {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"error":"authentication_required"}"#))
+            .unwrap();
+    }
+
+    let ip = path;
     if !waf_core::database::validate_ip(&ip) {
         return Response::builder()
             .status(StatusCode::BAD_REQUEST)
@@ -254,11 +323,27 @@ async fn whitelist_admin_handler(
 
 async fn status_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    // Authenticate via X-Admin-Token header
+    let token = headers.get("X-Admin-Token")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    
+    let result = state.admin_service.authenticate(token, "/status");
+    if !result.authorized {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"error":"authentication_required"}"#))
+            .unwrap();
+    }
+
+    let status_json = waf_core::admin_auth::service::AdminCommandExecutor::execute_status();
     let mut resp = Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
-        .body(Body::from(r#"{"status":"running","version":"0.1.0"}"#))
+        .body(Body::from(status_json))
         .unwrap();
     state.middleware.apply_security_headers(resp.headers_mut());
     resp
@@ -266,7 +351,22 @@ async fn status_handler(
 
 async fn metrics_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    // Authenticate via X-Admin-Token header
+    let token = headers.get("X-Admin-Token")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    
+    let result = state.admin_service.authenticate(token, "/metrics");
+    if !result.authorized {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("Content-Type", "text/plain")
+            .body(Body::from(r#"{"error":"authentication_required"}"#))
+            .unwrap();
+    }
+
     let metrics_text = state.waf.render_metrics();
     let body_content = if metrics_text.is_empty() {
         String::from("No metrics enabled (prometheus feature not active)")
@@ -425,39 +525,81 @@ struct ServeCmd {
 
 // ── CLI handler functions ───────────────────────────────
 
-async fn handle_block_ip(ip: &str, reason: &str, admin_port: u16) {
-    let url = format!("http://127.0.0.1:{}/admin/block/{}", admin_port, ip);
-    match reqwest::Client::new().post(&url).send().await {
-        Ok(_) => println!("✅ Blocked IP: {} (reason: {})", ip, reason),
+async fn handle_block_ip(ip: &str, reason: &str, admin_port: u16, token: Option<&str>) {
+    let client = reqwest::Client::new();
+    let mut builder = client.post(format!("http://127.0.0.1:{}/block/{}", admin_port, ip));
+    if let Some(tok) = token {
+        builder = builder.header("X-Admin-Token", tok);
+    }
+    match builder.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.is_success() {
+                println!("✅ Blocked IP: {} (reason: {})", ip, reason);
+            } else {
+                let text = resp.text().await.unwrap_or_default();
+                eprintln!("❌ Server error: {} - {}", status, text);
+            }
+        }
         Err(e) => eprintln!("❌ Failed to block IP {}: {}", ip, e),
     }
 }
 
-async fn handle_unblock_ip(ip: &str, admin_port: u16) {
-    let url = format!("http://127.0.0.1:{}/admin/unblock/{}", admin_port, ip);
-    match reqwest::Client::new().post(&url).send().await {
-        Ok(_) => println!("✅ Unblocked IP: {}", ip),
+async fn handle_unblock_ip(ip: &str, admin_port: u16, token: Option<&str>) {
+    let client = reqwest::Client::new();
+    let mut builder = client.post(format!("http://127.0.0.1:{}/unblock/{}", admin_port, ip));
+    if let Some(tok) = token {
+        builder = builder.header("X-Admin-Token", tok);
+    }
+    match builder.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.is_success() {
+                println!("✅ Unblocked IP: {}", ip);
+            } else {
+                let text = resp.text().await.unwrap_or_default();
+                eprintln!("❌ Server error: {} - {}", status, text);
+            }
+        }
         Err(e) => eprintln!("❌ Failed to unblock IP {}: {}", ip, e),
     }
 }
 
-async fn handle_whitelist_ip(ip: &str, reason: &str, admin_port: u16) {
-    let url = format!("http://127.0.0.1:{}/admin/whitelist/{}", admin_port, ip);
-    match reqwest::Client::new().post(&url).send().await {
-        Ok(_) => println!("✅ Whitelisted IP: {} (reason: {})", ip, reason),
+async fn handle_whitelist_ip(ip: &str, reason: &str, admin_port: u16, token: Option<&str>) {
+    let client = reqwest::Client::new();
+    let mut builder = client.post(format!("http://127.0.0.1:{}/whitelist/{}", admin_port, ip));
+    if let Some(tok) = token {
+        builder = builder.header("X-Admin-Token", tok);
+    }
+    match builder.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.is_success() {
+                println!("✅ Whitelisted IP: {} (reason: {})", ip, reason);
+            } else {
+                let text = resp.text().await.unwrap_or_default();
+                eprintln!("❌ Server error: {} - {}", status, text);
+            }
+        }
         Err(e) => eprintln!("❌ Failed to whitelist IP {}: {}", ip, e),
     }
 }
 
-async fn handle_status(limit: usize, admin_port: u16) {
-    let url = format!("http://127.0.0.1:{}/admin/status?limit={}", admin_port, limit);
-    match reqwest::Client::new().get(&url).send().await {
+async fn handle_status(limit: usize, admin_port: u16, token: Option<&str>) {
+    let client = reqwest::Client::new();
+    let mut builder = client.get(format!("http://127.0.0.1:{}/status?limit={}", admin_port, limit));
+    if let Some(tok) = token {
+        builder = builder.header("X-Admin-Token", tok);
+    }
+    match builder.send().await {
         Ok(resp) => {
-            if resp.status().is_success() {
+            let status = resp.status();
+            if status.is_success() {
                 let text = resp.text().await.unwrap_or_default();
                 println!("📋 WAF Status:\n{}", text);
             } else {
-                eprintln!("❌ Server returned status: {}", resp.status());
+                let text = resp.text().await.unwrap_or_default();
+                eprintln!("❌ Server error: {} - {}", status, text);
             }
         }
         Err(e) => eprintln!("❌ Failed to get status: {}", e),

@@ -5,8 +5,8 @@
 //! # Gargouille WAF Engine Library
 //!
 //! A modular web application firewall engine written in Rust.
-//! Parses HTTP requests, runs 9 rule detectors, scores threats,
-//! and returns a simple allow/block decision.
+//! Parses HTTP requests, runs 10 rule detectors, scores threats,
+//! and returns a simple allow/block/challenge decision.
 //!
 //! ## Quick start
 //!
@@ -14,15 +14,13 @@
 //!
 //! ```toml
 //! [dependencies]
-//! gargouille = { version = "0.1" }
+//! waf-core = { path = "../waf-core" }
 //! ```
-//!
 //! ```ignore
-//! use gargouille::config::WafConfig;
-//! use gargouille::{GargouilleWaf, HttpRequest};
+//! use waf_core::{GargouilleWaf, HttpRequest, WafConfig};
 //!
 //! let config = WafConfig::default();
-//! let mut waf = GargouilleWaf::new(config);
+//! let waf = GargouilleWaf::new(config);
 //!
 //! let request = HttpRequest {
 //!     method: "GET".into(),
@@ -64,6 +62,18 @@
 
 mod allowlist_schema;
 mod allowlist_service;
+
+// ── Admin auth module (secure access control) ───────────
+pub mod admin_auth {
+    pub mod types;
+    pub mod schema;
+    pub mod service;
+
+    // Re-export key types at the admin_auth level
+    pub use crate::admin_auth::types::{AdminCommand, AdminPathConfig, AdminAuthError, AuthResult};
+    pub use crate::admin_auth::schema::AdminTokenValidation;
+    pub use crate::admin_auth::service::{AdminAuthService, AdminCommandExecutor};
+}
 
 mod config;
 pub use config::*;

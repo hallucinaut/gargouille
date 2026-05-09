@@ -30,6 +30,8 @@ pub struct WafConfig {
     pub bot_protection: BotProtectionConfig,
     #[serde(default)]
     pub response_headers: ResponseHeadersConfig,
+    #[serde(default)]
+    pub admin_auth: AdminAuthConfig,
 }
 
 // ─── Server ──────────────────────────────────────────────
@@ -243,6 +245,34 @@ pub struct ResponseHeadersConfig {
     pub strict_transport_security: String,
 }
 
+// ─── Admin Auth ──────────────────────────────────────────
+
+/// Configuration for the secure admin authentication subsystem.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AdminAuthConfig {
+    /// When enabled, all /admin-equivalent endpoints require a valid token.
+    #[serde(default = "default_admin_auth_enabled")]
+    pub enabled: bool,
+    /// Secret token used for admin authentication. If empty, a random
+    /// hex string is generated at startup and logged to stderr.
+    #[serde(default)]
+    pub token: String,
+    /// Length of the randomized admin path prefix (characters after initial '/').
+    /// Must be between 8 and 32. Longer = more unpredictable.
+    #[serde(default = "default_admin_path_length")]
+    pub path_length: u32,
+}
+
+impl Default for AdminAuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            token: String::new(),
+            path_length: 16,
+        }
+    }
+}
+
 // ──────────────────── Helpers ────────────────────────────
 
 fn default_listen_addr() -> String { "0.0.0.0".into() }
@@ -280,9 +310,17 @@ fn default_metrics_path() -> String { "/metrics".into() }
 fn default_min_tls() -> String { "TLS_1_2".into() }
 fn default_captcha_threshold() -> u32 { 5 }
 fn default_challenge_type() -> String { "js_challenge".into() }
+fn default_admin_auth_token() -> String { String::new() }
 fn default_high_confidence_threshold() -> f32 { 0.90 }
+fn default_admin_auth_enabled() -> bool { true }
+fn default_admin_path_length() -> u32 { 16 }
+fn max_admin_path_length() -> u32 { 32 }
+fn min_admin_path_length() -> u32 { 8 }
 fn clamp_weight(val: u32) -> u32 {
     val.clamp(1, 100)
+}
+fn clamp_path_length(val: u32) -> u32 {
+    val.clamp(min_admin_path_length(), max_admin_path_length())
 }
 fn clamp_threshold(val: u32) -> u32 {
     if val > 100 {
@@ -338,6 +376,12 @@ impl WafConfig {
         if self.metrics.enabled && self.metrics.port == 0 {
             warnings.push("Metrics enabled but port is 0".into());
         }
+        if self.admin_auth.path_length < min_admin_path_length() {
+            warnings.push(format!("admin_auth.path_length {} below minimum ({})", self.admin_auth.path_length, min_admin_path_length()));
+        }
+        if self.admin_auth.path_length > max_admin_path_length() {
+            warnings.push(format!("admin_auth.path_length {} exceeds maximum ({})", self.admin_auth.path_length, max_admin_path_length()));
+        }
         warnings
     }
 
@@ -360,9 +404,9 @@ impl WafConfig {
             eprintln!("⚠ high_confidence_threshold out of range, resetting to 0.90");
             s.high_confidence_threshold = 0.90;
         }
+        self.admin_auth.path_length = clamp_path_length(self.admin_auth.path_length);
     }
 }
-
 impl Default for WafConfig {
     fn default() -> Self {
         Self {
@@ -452,6 +496,11 @@ impl Default for WafConfig {
                 referrer_policy: "strict-origin-when-cross-origin".into(),
                 permissions_policy: "camera=(), microphone=(), geolocation=()".into(),
                 strict_transport_security: "max-age=31536000; includeSubDomains".into(),
+            },
+            admin_auth: AdminAuthConfig {
+                enabled: default_admin_auth_enabled(),
+                token: default_admin_auth_token(),
+                path_length: default_admin_path_length(),
             },
         }
     }

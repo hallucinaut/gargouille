@@ -1,6 +1,6 @@
 # Gargouille — Web Application Firewall
 
-A lightweight HTTP request inspection engine written in Rust. It evaluates incoming requests against 9 rule detectors, scores threats, and returns an allow/block decision. Built as a reverse proxy server with an admin API for runtime management.
+A lightweight HTTP request inspection engine written in Rust. It evaluates incoming requests against 10 rule detectors, scores threats, and returns an allow/block/challenge decision. Built as a reverse proxy server with an admin API for runtime management.
 
 ## Architecture
 
@@ -14,14 +14,14 @@ A lightweight HTTP request inspection engine written in Rust. It evaluates incom
 ### Core Engine (`waf-core` crate)
 
 - **Request parsing** — Extracts method, URI, path, query string, headers, cookies, and body
-- **9 rule detectors** — SQL injection, XSS, command injection, LFI/RFI, SSTI, SSRF, insecure deserialization, HTTP header injection, path traversal
+- **10 rule detectors** — SQL injection, XSS, command injection, LFI/RFI, SSTI, SSRF, insecure deserialization, HTTP header injection, path traversal, bot detection
   - Each detector uses compiled regex patterns for deep analysis
   - Confidence scores per match (0.4–0.95) based on pattern type
   - Double/triple URL-decoding check to catch encoded attacks
 - **Risk scoring** — Accumulates threat points across all detectors; capped at 100, max 3 hits per category
 - **Decision pipeline** — Returns one of four outcomes: `Pass`, `Block(reason)`, `Challenge`, `RateLimited`
 - **Direct-block override** — Any single threat with confidence >= config threshold forces a block
-- **Path-based allowlist (deny-by-default)** — Block all requests except those on explicitly allowed paths. Auto-whitelists `/admin/*` and `/metrics` so the WAF stays manageable. Allowed paths still get full WAF rule scanning, so attacks inside allowed paths are detected and blocked.
+- **Path-based allowlist (deny-by-default)** — Block all requests except those on explicitly allowed paths. Auto-whitelists literal `/admin/*` and `/metrics` endpoints so the WAF stays manageable. Allowed paths still get full WAF rule scanning, so attacks inside allowed paths are detected and blocked.
 - **Sliding-window rate limiter** — Per-IP request counting with configurable burst allowance and auto-expiring blocks
 - **Per-endpoint rate limiting** — Separate limits for configured paths (e.g., `/api/login`)
 - **SQLite blocklist & audit log** — Persistent IP block/whitelist lists and per-request audit entries (feature-gated)
@@ -31,12 +31,13 @@ A lightweight HTTP request inspection engine written in Rust. It evaluates incom
 
 - **Axum-based HTTP server** — Reverse proxy that binds to a configurable port
 - **Security headers** — X-Frame-Options, CSP, Referrer-Policy, Permissions-Policy, HSTS applied to all responses
-- **Admin API** — REST endpoints for runtime management:
-  - `POST /admin/block/{ip}` — Block an IP with reason (validates IP format)
-  - `POST /admin/unblock/{ip}` — Unblock an IP (validates IP format)
-  - `POST /admin/whitelist/{ip}` — Whitelist an IP with reason (validates IP format)
-  - `GET /admin/status` — Health check (returns JSON status)
-  - `GET /admin/metrics` — Prometheus metrics text export
+- **Admin API** — Token-authenticated REST endpoints for runtime management. All admin paths use a randomized prefix (not `/admin`) to prevent enumeration. Admin endpoints are auto-whitelisted regardless of allowlist mode:
+  - `POST <prefix>block/{ip}` — Block an IP with reason (validates IPv4/IPv6 format)
+  - `POST <prefix>unblock/{ip}` — Unblock an IP
+  - `POST <prefix>whitelist/{ip}` — Whitelist an IP with reason
+  - `GET <prefix>status` — Health check (returns JSON status)
+  - `GET <prefix>metrics` — Prometheus metrics text export
+  Authentication uses the `X-Admin-Token` header.
 - **Upstream forwarding** — Allowed requests are forwarded to the configured backend preserving method, query string, body, and response headers
 
 ## Quick start
@@ -47,7 +48,7 @@ cd gargouille
 # Build everything
 cargo build
 
-# Run all tests (190 unit + 62 integration)
+# Run all tests (287 unit + 125 integration)
 cargo test --all
 
 # Validate configuration
@@ -61,13 +62,15 @@ cargo test --all
 
 | Command | Description |
 |---------|-------------|
-| `serve [-c config] [--port PORT] [--upstream-port PORT]` | Starts the WAF reverse proxy + admin API server. Loads TOML config and binds to configurable port. |
-| `block <ip> [-r reason] [--admin-port PORT]` | Sends a POST request to a running server's admin API at `/admin/block/{ip}`. Validates IP format. |
-| `unblock <ip> [--admin-port PORT]` | Sends a POST request to `/admin/unblock/{ip}` on the running server. |
-| `whitelist <ip> [-r reason] [--admin-port PORT]` | Sends a POST request to `/admin/whitelist/{ip}` on the running server. |
-| `status [--limit N] [--admin-port PORT]` | Sends a GET request to `/admin/status?limit={N}` on the running server. Prints JSON status. |
+| `serve [-c config] [--port PORT] [--upstream-port PORT]` | Starts the WAF reverse proxy + admin API server. Loads TOML config and binds to configurable port. Prints admin token and randomized path prefix on startup. |
+| `block <ip> [-r reason] [--admin-port PORT] [--token TOKEN]` | Sends a POST request to a running server's admin API to block an IP. Validates IPv4/IPv6 format. Uses `--token` for auth if auto-generated token is not in config. |
+| `unblock <ip> [--admin-port PORT] [--token TOKEN]` | Sends a POST request to the server's unblock endpoint on the running server. |
+| `whitelist <ip> [-r reason] [--admin-port PORT] [--token TOKEN]` | Sends a POST request to the server's whitelist endpoint on the running server. |
+| `status [--limit N] [--admin-port PORT] [--token TOKEN]` | Sends a GET request to the server's status endpoint. Prints JSON status. |
 | `metrics` | Instantiates a fresh WafMetrics, renders and prints Prometheus-format metrics. (No live data.) |
 | `check-config <file>` | Loads, validates, and sanitizes a TOML configuration file. Prints warnings for out-of-range values. |
+
+The `--token` flag on CLI commands can be used when the admin token was auto-generated at startup or set via config.
 
 ## Configuration
 
@@ -79,9 +82,12 @@ All settings live in `config/default.toml`, loaded via `WafConfig::load()`. Miss
 |-----|---------|-------------|
 | `listen_addr` | `0.0.0.0` | Bind address |
 | `listen_port` | `8443` | WAF proxy + admin API port |
+| `reverse_proxy_port` | `8080` | HTTP reverse proxy port (for TLS termination) |
 | `upstream_host` | `127.0.0.1` | Backend server host |
 | `upstream_port` | `3000` | Backend server port |
-| `tls_enabled` | `true` | TLS configuration flag (server-side TLS serving not yet implemented) |
+| `tls_enabled` | `true` | Enable TLS on the listener |
+| `tls_cert` | (empty) | Path to TLS certificate file |
+| `tls_key` | (empty) | Path to TLS private key file |
 
 ### WAF engine settings
 
@@ -108,7 +114,7 @@ Each category contributes `weight * min(matches, 3)` points (max 3 per category)
 | `threat_threshold` | `50` | Block if accumulated score >= this value (capped at 100) |
 | `high_confidence_threshold` | `0.90` | Any single match at >= this confidence forces a direct block |
 
-Per-category weights: `sql_injection_weight`, `xss_weight`, `command_injection_weight`, `lfi_rfi_weight`, `ssti_weight`, `ssrf_weight`, `deserialization_weight`, `header_injection_weight`, `path_traversal_weight`, `protocol_violation_weight` (all default 15–35).
+Per-category weights: `sql_injection_weight` (30), `xss_weight` (25), `command_injection_weight` (35), `lfi_rfi_weight` (30), `ssti_weight` (30), `ssrf_weight` (25), `deserialization_weight` (35), `header_injection_weight` (20), `path_traversal_weight` (20), `protocol_violation_weight` (15), `anomaly_score` (10), `bot_detection_weight` (10).
 
 ### Rate limiting settings
 
@@ -118,7 +124,14 @@ Per-category weights: `sql_injection_weight`, `xss_weight`, `command_injection_w
 | `requests_per_window` | `100` | Allowed requests per IP per window |
 | `window_seconds` | `60` | Sliding window size |
 | `burst_allowance` | `20` | Extra requests allowed above the hard limit |
-| `endpoint_limits` | `{}` | Per-path limits: `{"\/api\/login": 10, ...}` |
+| `endpoint_limits` | `{}` | Per-path limits: `{"\/api\/login": 10, "\/api\/register": 5, ...}` |
+
+#### Rate limit blocking (sub-section)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `block.duration_minutes` | `60` | Duration to block an IP after exceeding the rate limit |
+| `auto_unblock` | `false` | Automatically unblock IPs after the duration expires |
 
 ### Blocklist settings
 
@@ -127,24 +140,72 @@ Per-category weights: `sql_injection_weight`, `xss_weight`, `command_injection_w
 | `enabled` | `true` | Enable SQLite blocklist/whitelist |
 | `database_path` | `database/gargouille.db` | SQLite database file path |
 
-### Metrics settings
+### GeoIP settings (feature: geo-ip)
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `enabled` | `true` | Enable Prometheus metrics |
-| `port` | `9090` | Metrics server port (for future use) |
+| `enabled` | `false` | Enable IP geolocation and country blocking |
+| `db_path` | (empty) | Path to MaxMind GeoLite2 Country database file |
+| `blocked_countries` | `[]` | List of ISO 3166-1 alpha-2 country codes to block |
+| `min_reputation_score` | `40` | Minimum IP reputation score (0–100) to allow |
+
+### Logging settings
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `level` | `info` | Log level: trace, debug, info, warn, error |
+| `format` | `json` | Output format: json or pretty |
+| `log_file` | (empty) | Path to log file |
+| `log_blocked` | `false` | Include full details of blocked requests in logs |
+| `sample_rate` | `1.0` | Request sampling ratio for high-traffic (1.0 = all, 0.1 = 10%) |
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `true` | Enable Prometheus metrics export |
+| `port` | `9090` | Prometheus metrics server port |
 | `path` | `\/metrics` | Metrics endpoint path |
 
-### Response headers
+### Response headers (sub-section)
 
 These security headers are applied to all responses via middleware:
 
-- `X-Frame-Options`: DENY
-- `X-Content-Type-Options`: nosniff
-- `Content-Security-Policy`: default-src 'self'; script-src 'self'
-- `Referrer-Policy`: strict-origin-when-cross-origin
-- `Permissions-Policy`: camera=(), microphone=(), geolocation=()
-- `Strict-Transport-Security`: max-age=31536000; includeSubDomains
+| Key | Default |
+|-----|---------|
+| `x_frame_options` | `DENY` |
+| `x_content_type_options` | `nosniff` |
+| `x_xss_protection` | `0` (disabled -- CSP handles XSS protection) |
+| `content_security_policy` | `default-src 'self'; script-src 'self'` |
+| `referrer_policy` | `strict-origin-when-cross-origin` |
+| `permissions_policy` | `camera=(), microphone=(), geolocation=()` |
+| `strict_transport_security` | `max-age=31536000; includeSubDomains` |
+
+### Admin auth settings (sub-section)
+
+Admin endpoints use a randomized path prefix and token-based authentication. The admin prefix is not `/admin` (it's generated from config to prevent enumeration).
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `true` | Require authentication on admin endpoints |
+| `token` | (auto-generated) | Secret token for X-Admin-Token header. If empty, a random 64-char hex string is generated at startup |
+| `path_length` | `16` | Length of the randomized admin path prefix (8–32). Longer = more unpredictable |
+
+### TLS Inspector settings (feature: tls-inspection)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `false` | Enable TLS traffic inspection |
+| `deep_packet_inspection` | `false` | Enable deep packet analysis of TLS payloads |
+| `min_tls_version` | `TLS_1_2` | Minimum allowed TLS version: TLS_1_2, TLS_1_3 |
+| `cipher_suites_blocked` | `[]` | List of blocked cipher suite names (e.g., RC4, 3DES) |
+
+### Bot Protection settings (sub-section)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `true` | Enable bot detection and blocking |
+| `block_bad_bots` | `true` | Automatically block detected scanners/bots |
+| `captcha_threshold` | `5` | Number of challenges before requiring CAPTCHA |
+| `challenge_type` | `js_challenge` | Challenge type: js_challenge, captcha, honeypot |
 
 ## Library usage
 
@@ -207,8 +268,8 @@ println!("{}", waf.render_metrics());
 |---------|---------|---------------|
 | `sqlite` | yes | `database` module — SQLite blocklist, whitelist, audit log |
 | `prometheus` | yes | `metrics` module — Prometheus atomic counters + text export |
-| `tls-inspection` | no | Config types in `WafConfig` (TLS inspector, bot protection) |
-| `geo-ip` | no | Config types in `WafConfig` (GeoIP blocking settings) |
+| `tls-inspection` | no | TLS config types in `WafConfig` (deep packet inspection, cipher analysis) |
+| `geo-ip` | no | GeoIP config types in `WafConfig` (country blocking, IP reputation) |
 
 Drop features with `default-features = false` to minimize the dependency tree. The core engine (~15 deps, regex-only) runs without any optional feature.
 
@@ -216,6 +277,8 @@ Drop features with `default-features = false` to minimize the dependency tree. T
 
 ```
 Request arrives
+    │
+    ├─ Allowlist check ─────────── if path not in allowed list → Decision::Blocked(AllowlistDenied) [only when allowlist.enabled=true]
     │
     ├─ Per-endpoint rate limiter ── if exceeded → Decision::RateLimited
     │
@@ -225,7 +288,7 @@ Request arrives
     │
     ├─ Body size check ───────────── if oversized → Decision::Blocked(ThreatScoreExceeded)
     │
-    ├─ Run all 9 detectors ─────────► collect threats with confidence scores
+    ├─ Run all 10 detectors ───────► collect threats with confidence scores
     │
     ├─ Score accumulation ────────── weight * min(matches, 3), capped at 100
     │
@@ -262,14 +325,14 @@ For small projects, traditional allow-list-and-check approach creates maintenanc
 |-------------------------------|-----------------|
 | Every new route must stay clean or be patched | You whitelist routes you actually have |
 | Forgetting a rule catches nothing | Forgetting to add a path blocks it immediately |
-| 9 detectors run on every request, including static assets that would never be attacked | Only whitelisted routes hit the detection engine |
+| 10 detectors run on every request, including static assets that would never be attacked | Only whitelisted routes hit the detection engine |
 | Attackers probe all endpoints looking for loopholes | Most of your surface area is already closed |
 
 With deny-by-default:
 
 - You list only your real API routes (e.g., `/test/toto`, `/api/login`)
 - Every other URL returns 403 before any scanning happens
-- Whitelisted routes still get all 9 WAF rule detectors active, so SQLi and XSS inside allowed paths are caught
+- Whitelisted routes still get all 10 WAF rule detectors active, so SQLi and XSS inside allowed paths are caught
 - Admin endpoints (`/admin/*`) are auto-whitelisted so you can always manage the WAF
 
 Example config:
@@ -297,7 +360,8 @@ With this configuration:
 | **SSRF** | `rules/ssrf.rs` | Cloud metadata endpoints, private RFC1918 ranges, localhost/loopback, internal protocol abuse | Encoded hostname detection |
 | **Deserialization** | `rules/deserialization.rs` | PHP serialized objects, Python pickle protocols, YAML object tags, .NET BinaryFormatter | Matches raw serialized payload signatures |
 | **Header Injection** | `rules/header_injection.rs` | CRLF sequences, response splitting, Set-Cookie/Location manipulation, X-Forwarded-Host injection | Double-encoded CRLF detection |
-| **Path Traversal** | `rules/path_traversal.rs` | Classic `../`, backslash traversal, double encoding, null byte injection | Separate from LFI — focuses on filename/path poisoning |
+| **Path Traversal** | `rules/path_traversal.rs` | Classic `../`, backslash traversal, double encoding, null byte injection | Separate from LFI -- focuses on filename/path poisoning |
+| **Bot Detection** | `rules/bot_detection.rs` | Scanner fingerprints (sqlmap, nmap, nikto, burp suite, nuclei, ffuf, gobuster, dirbuster, hydra, masscan, acunetix, zap), empty UA detection, single-char UA, control characters in headers, encoded scanner fingerprints, referer-based scanning | Case-insensitive matching, deduplication across locations, hex-encoded scanner fingerprint support |
 
 ## Metrics
 
@@ -323,7 +387,7 @@ gargouille/
     config.rs                    — WafConfig, all sub-configs, TOML load/validate/sanitize
     waf.rs                       — GargouilleWaf: orchestrates rate limiter → blocklist →
                                    body check → rule engine → scoring → decision
-    engine.rs                    — RuleEngine: instantiates 9 detectors, runs scan pipeline
+    engine.rs                    — RuleEngine: instantiates 10 detectors, runs scan pipeline
     parser.rs                    — HttpRequest struct, URL decoding (limited depth),
                                    query param parsing, cookie parsing, searchable_text()
     allowlist_schema.rs          — Zero-trust path validation: rejects traversal, null bytes, encoded attacks, entries over 512 chars
@@ -333,6 +397,15 @@ gargouille/
     rate_limit.rs                — RateLimiter: per-IP sliding window + blocked IP map
     metrics.rs                   — WafMetrics: atomic counters + Prometheus render
     database.rs                  — SQLite CRUD: blocklist, whitelist, audit log (feature-gated)
+    admin_auth/
+      types.rs                   — AdminCommand, AdminPathConfig, AdminAuthError, AuthResult,
+                                   const_time_eq for timing-safe token comparison
+      schema.rs                  — AdminCommandValidator, AdminTokenValidation: validates commands
+                                   against traversal/null-byte injection, generates deterministic admin
+                                   path prefix and auth token from config seed
+      service.rs                 — AdminAuthService: thread-safe authentication gatekeeper with
+                                   randomized admin prefix (not "/admin"), masked token logging,
+                                   AdminCommandExecutor for block/unblock/whitelist/status operations
     rules/                       — Rule detectors — one module per attack category
       mod.rs                     — Shared helpers: compile_regex(), normalize_for_scan(),
                                    check_encoded_variations(), calibrate_confidence()
@@ -352,6 +425,10 @@ gargouille/
                                      host injection, response splitting)
       path_traversal.rs          — 4 patterns (classic traversal, double encoding, null byte,
                                      backslash traversal)
+      bot_detection.rs           — Scanner fingerprint detection: sqlmap, nmap, nikto, burp suite,
+                                     nuclei, ffuf, gobuster, dirbuster, hydra, masscan, acunetix, zap;
+                                     empty UA, single-char UA, control chars, null bytes, encoded
+                                     fingerprints, referer scanning, case-insensitive matching
 
   waf-cli/src/                   ← binary crate — CLI + HTTP server
     main.rs                      — clap CLI parsing, Axum router setup with state-driven
@@ -361,8 +438,14 @@ gargouille/
     middleware/chain.rs           — GargouilleMiddleware: applies security headers to responses
 
   waf-core/tests/
+    admin_auth_tests.rs          — Admin auth: token validation, const-time comparison, path prefix
+                                   security, command decoding with traversal/null-byte rejection,
+                                   deterministic token generation, error non-leakage
+    allowlist_tests.rs           — Allowlist enabled/disabled, path matching, traversal bypass attempts,
+                                   encoding bypass, SQLi/XSS still caught on allowed paths, case sensitivity
     integration_tests.rs         — End-to-end tests across all attack vectors, rate limiting,
-                                   scoring thresholds, per-endpoint limits, IP validation, and HTTP methods
+                                   scoring thresholds, per-endpoint limits, IP validation, HTTP methods,
+                                   bot detection integration
   config/default.toml            — Full configuration with defaults for every section
 ```
 
@@ -370,10 +453,10 @@ gargouille/
 
 ```bash
 # All crates — unit + integration tests
-cargo test --all          # 288 tests pass (210 unit + 78 integration)
+cargo test --all          # 412 tests pass (287 unit + 125 integration)
 
 # Only waf-core library
-cargo test -p waf-core    # 210 tests: lib unit tests + schema/service internal tests + integration tests
+cargo test -p waf-core    # 412 tests: lib unit tests + admin_auth + allowlist + integration tests
 
 # Only CLI binary compilation (no tests in the binary crate itself)
 cargo test -p waf-cli     # compiles cleanly, 0 tests
@@ -386,12 +469,15 @@ cargo test -p waf-cli     # compiles cleanly, 0 tests
 | Rate limiter | 14 | Limits, burst allowance, per-IP independence, blocked/unblocked IPs, endpoint-specific limits, stats, cleanup |
 | Scoring engine | 12 | Empty input, single/multi-category weights, capping at 100, threshold decisions, display formatting |
 | Rule detectors | ~85 | Each detector has positive tests (attack payloads), negative tests (clean inputs), case-insensitivity, edge cases |
+| Bot detection | ~37 | Scanner fingerprints (sqlmap, nmap, nikto, burp, nuclei, ffuf, gobuster, dirbuster, hydra, masscan, acunetix, zap), empty UA, single-char UA, control chars, null byte UA, encoded scanners, referer scanning, case-insensitive matching |
 | WAF orchestrator (`engine.rs`) | 17 | Clean requests, SQLi/XSS/CLI/PT in body+query, combined attacks, header injection, SSTI/SSRF/LFI/deserialization detection |
+| Admin auth | 22 | Token validation (correct/wrong/empty/null-byte), const-time comparison, path prefix generation, command decoding (traversal/rejection), config determinism, error non-leakage |
 | Allowlist schema | ~9 | Path validation: leading slash requirement, traversal rejection, query/fragment rejection, null bytes, control chars, length limit, normalization |
 | Allowlist service | ~12 | Prefix matching, exact match, auto-whitelist, disabled mode, case sensitivity, runtime update, query string stripping |
 | Database | 8 | Schema creation, add/check/remove blocklist, audit log, recent threats, whitelist, duplicate handling |
 | Prometheus metrics | 11 | Zero-state, increment counters, render format, reset, high/low scores |
-| Integration (all) | 78 | Full pipeline: clean passes, all attack vectors blocked, rate limiting, scoring thresholds, per-endpoint limits, mixed requests, cookies, encoded queries, IP validation, case-insensitive headers, direct-block thresholds, allowlist pass/block, WAF rules on allowed paths, auto-whitelist bypass prevention |
+| Integration (all) | 87 | Full pipeline: clean passes, all attack vectors blocked, rate limiting, scoring thresholds, per-endpoint limits, mixed requests, cookies, encoded queries, IP validation, case-insensitive headers, direct-block thresholds, allowlist pass/block, WAF rules on allowed paths, auto-whitelist bypass prevention, bot detection integration |
+| Allowlist tests | 16 | Allowlist enabled/disabled, path matching, traversal bypass attempts, encoding bypass, SQLi/XSS still caught on allowed paths, case sensitivity |
 
 ## Security considerations
 
